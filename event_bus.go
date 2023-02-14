@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 )
 
-//BusSubscriber defines subscription-related bus behavior
+var queueSize int64 //
+
+// BusSubscriber defines subscription-related bus behavior
 type BusSubscriber interface {
 	Subscribe(topic string, fn interface{}) error
 	SubscribeAsync(topic string, fn interface{}, transactional bool) error
@@ -15,18 +18,19 @@ type BusSubscriber interface {
 	Unsubscribe(topic string, handler interface{}) error
 }
 
-//BusPublisher defines publishing-related bus behavior
+// BusPublisher defines publishing-related bus behavior
 type BusPublisher interface {
 	Publish(topic string, args ...interface{})
 }
 
-//BusController defines bus control behavior (checking handler's presence, synchronization)
+// BusController defines bus control behavior (checking handler's presence, synchronization)
 type BusController interface {
 	HasCallback(topic string) bool
 	WaitAsync()
+	GetQueueSize() int64
 }
 
-//Bus englobes global (subscribe, publish, control) bus behavior
+// Bus englobes global (subscribe, publish, control) bus behavior
 type Bus interface {
 	BusController
 	BusSubscriber
@@ -149,6 +153,7 @@ func (bus *EventBus) Publish(topic string, args ...interface{}) {
 					handler.Lock()
 					bus.lock.Lock()
 				}
+				atomic.AddInt64(&queueSize, 1)
 				go bus.doPublishAsync(handler, topic, args...)
 			}
 		}
@@ -161,7 +166,10 @@ func (bus *EventBus) doPublish(handler *eventHandler, topic string, args ...inte
 }
 
 func (bus *EventBus) doPublishAsync(handler *eventHandler, topic string, args ...interface{}) {
-	defer bus.wg.Done()
+	defer func() {
+		bus.wg.Done()
+		atomic.AddInt64(&queueSize, -1)
+	}()
 	if handler.transactional {
 		defer handler.Unlock()
 	}
@@ -181,6 +189,10 @@ func (bus *EventBus) removeHandler(topic string, idx int) {
 	copy(bus.handlers[topic][idx:], bus.handlers[topic][idx+1:])
 	bus.handlers[topic][l-1] = nil // or the zero value of T
 	bus.handlers[topic] = bus.handlers[topic][:l-1]
+}
+
+func (bus *EventBus) GetQueueSize() int64 {
+	return queueSize
 }
 
 func (bus *EventBus) findHandlerIdx(topic string, callback reflect.Value) int {
